@@ -20,6 +20,10 @@ Abstract:
 #include "mlasi.h"
 #include "eltwise.h"
 
+#if defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
+
 template <>
 void
 MLASCALL
@@ -62,6 +66,19 @@ MlasEltwiseMul<float>(
     float* output,
     size_t N
 ) {
+#if defined(__riscv_vector)
+    // One multiply per lane, same rounding as the scalar product.
+    while (N > 0) {
+        const size_t vl = __riscv_vsetvl_e32m8(N);
+        const vfloat32m8_t a = __riscv_vle32_v_f32m8(left, vl);
+        const vfloat32m8_t b = __riscv_vle32_v_f32m8(right, vl);
+        __riscv_vse32_v_f32m8(output, __riscv_vfmul_vv_f32m8(a, b, vl), vl);
+        left += vl;
+        right += vl;
+        output += vl;
+        N -= vl;
+    }
+#else
     while (N > 0) {
         if (N >= 4) {
             MLAS_FLOAT32X4 LeftVec = MlasLoadFloat32x4(left);
@@ -84,6 +101,7 @@ MlasEltwiseMul<float>(
             N -= 1;
         }
     }
+#endif
 }
 
 template <>

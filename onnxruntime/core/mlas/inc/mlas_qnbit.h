@@ -116,6 +116,41 @@ MlasQNBitGemmBatch(
 );
 
 /**
+ * @brief CompInt8 GEMM with fp16 activation rows (quantized in-kernel, fp32 accum/output).
+ *
+ * Skips bulk fp16→fp32 activation conversion at the operator level. Requires
+ * QuantizeARow_CompInt8_FromFp16 on the platform dispatch.
+ */
+struct MLAS_QNBIT_GEMM_COMPINT8_FP16A_PARAMS {
+    const MLAS_FP16* A = nullptr;
+    size_t lda = 0;
+    const void* QuantBDataWorkspace = nullptr;
+    const std::byte* PackedQuantBData = nullptr;
+    const float* QuantBScale = nullptr;
+    const void* QuantBZeroPoint = nullptr;
+    const float* Bias = nullptr;
+    float* C = nullptr;
+    size_t ldc = 0;
+};
+
+void MLASCALL
+MlasQNBitGemmBatch_CompInt8_FromFp16A(
+    size_t M,
+    size_t N,
+    size_t K,
+    size_t BatchN,
+    size_t BlkBitWidth,
+    size_t BlkLen,
+    MLAS_QNBIT_GEMM_COMPINT8_FP16A_PARAMS* DataParams,
+    void* Workspace,
+    MLAS_THREADPOOL* ThreadPool,
+    const MLAS_BACKEND_KERNEL_SELECTOR_CONFIG* BackendKernelSelectorConfig
+);
+
+bool MLASCALL
+MlasIsQNBitGemmCompInt8FromFp16Available();
+
+/**
  * @brief Determines whether a float32/16 quantized n-bit int GEMM implementation is available on the current platform.
  *
  * @param[in]   BlkBitWidth     quantized value bit width (e.g., 4 means 4 bit ints)

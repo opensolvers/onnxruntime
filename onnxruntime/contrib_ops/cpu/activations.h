@@ -69,14 +69,18 @@ class QuickGelu : public OpKernel {
     concurrency::ThreadPool* tp = context->GetOperatorThreadPool();
     int64_t elem_count = input->Shape().Size();
     constexpr int64_t length_per_task = 4096;  // this number comes from FastGelu.
-    int64_t task_count = (elem_count + length_per_task - 1) / length_per_task;
+    // A decode activation is one row. Run that row on the calling thread.
+    // Longer prefill rows still split into length_per_task chunks.
+    const bool one_row = elem_count <= length_per_task * 4;
+    const int64_t chunk = one_row ? elem_count : length_per_task;
+    const int64_t task_count = one_row ? 1 : (elem_count + length_per_task - 1) / length_per_task;
     concurrency::ThreadPool::TryBatchParallelFor(
         tp, static_cast<int32_t>(task_count),
         [&](ptrdiff_t task_idx) {
-          const auto start = task_idx * length_per_task;
+          const auto start = task_idx * chunk;
           const T* p_input = input_data + start;
           T* p_output = output_data + start;
-          int64_t count = std::min(length_per_task, elem_count - start);
+          int64_t count = std::min(chunk, elem_count - start);
 
           if (alpha_ == 1.0f) {
             MlasComputeSilu(p_input, p_output, onnxruntime::narrow<size_t>(count));

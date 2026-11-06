@@ -114,6 +114,73 @@ struct PackedQuantBDataStruct {
     size_t N_, BlockCountK_, BlkLen_;
 };
 
+// IME SQ8 BlkLen=32 pack-time Q8×16 panel layout (llama i8i8):
+//   per 16-col group per k-block: [16×fp16 scale = 32B][BlkLen×16 int8 tiles].
+// Per-column stride = (32 + BlkLen*16) / 16. BlkSum + flat fp32 scales follow
+// the panel slab (see MlasSQ8ResolvePackedQuantB).
+constexpr MLAS_FORCEINLINE size_t
+MlasSQ8x16KbBytes(size_t BlkLen)
+{
+    return 32 + BlkLen * 16;
+}
+
+constexpr MLAS_FORCEINLINE size_t
+MlasSQ8x16ColBytes(size_t BlkLen)
+{
+    return MlasSQ8x16KbBytes(BlkLen) / 16;
+}
+
+inline size_t
+MlasSQ8PackedBDataBytes(size_t N, size_t BlockCountK, size_t BlkLen)
+{
+    if (BlkLen == 32) {
+        const size_t Npad = MlasDivRoundup(N, size_t{16}) * 16;
+        return Npad / 16 * BlockCountK * MlasSQ8x16KbBytes(BlkLen);
+    }
+    return N * BlockCountK * BlkLen;
+}
+
+// Resolve PackedQuantBData / QuantBBlkSum / PackedQuantBScale for SQ8 workspace.
+// BlkLen=32 uses IME Q8×16 panels; other BlkLens use PackedQuantBDataStruct.
+inline void
+MlasSQ8ResolvePackedQuantB(
+    void* Workspace,
+    size_t N,
+    size_t BlockCountK,
+    size_t BlkLen,
+    bool QuantAUnsigned,
+    std::byte*& PackedQuantBData,
+    float*& QuantBBlkSum,
+    float*& PackedQuantBScale,
+    float*& BlkUnsignedQuantAZeroPointCorrection
+)
+{
+    if (BlkLen != 32) {
+        PackedQuantBDataStruct<float, 8> packed(Workspace, N, BlockCountK, BlkLen, QuantAUnsigned);
+        PackedQuantBData = packed.PackedQuantBData;
+        QuantBBlkSum = packed.QuantBBlkSum;
+        PackedQuantBScale = packed.PackedQuantBScale;
+        BlkUnsignedQuantAZeroPointCorrection = packed.BlkUnsignedQuantAZeroPointCorrection;
+        return;
+    }
+
+    constexpr size_t DataAlign = 32;
+    PackedQuantBData = static_cast<std::byte*>(MlasAlignAddress(Workspace, DataAlign));
+    const size_t panel_bytes = MlasSQ8PackedBDataBytes(N, BlockCountK, BlkLen);
+    const size_t BlkSumFloats = MlasDivRoundup(N, size_t{16}) * BlockCountK * 16;
+    QuantBBlkSum = reinterpret_cast<float*>(MlasAlignAddress(
+        PackedQuantBData + panel_bytes, MlasQNBitQuantBBlkSumAlignment()));
+    if (QuantAUnsigned) {
+        BlkUnsignedQuantAZeroPointCorrection = reinterpret_cast<float*>(MlasAlignAddress(
+            reinterpret_cast<std::byte*>(QuantBBlkSum) + BlkSumFloats * sizeof(float),
+            MlasQNBitQuantBBlkSumAlignment()));
+        PackedQuantBScale = BlkUnsignedQuantAZeroPointCorrection + BlkSumFloats;
+    } else {
+        BlkUnsignedQuantAZeroPointCorrection = nullptr;
+        PackedQuantBScale = QuantBBlkSum + BlkSumFloats;
+    }
+}
+
 template <size_t BlkBitWidth>
 constexpr MLAS_FORCEINLINE size_t
 MlasQNBitZeroPointsForBlksSizeInBytes(size_t BlkCount)
@@ -145,6 +212,16 @@ struct MLAS_QNBIT_GEMM_DISPATCH {
     );
 
     Q4BitGemmPackQuantBDataSize_Fn* Q4BitGemmPackQuantBDataSize = nullptr;
+
+    /** Per-column byte stride in packed B for SQ4 CompInt8 (default: packed 4-bit). */
+    typedef size_t(Q4BitGemmPackedBColumnStrideBytes_Fn)(
+        size_t BlkBitWidth,
+        size_t BlkLen,
+        size_t BlockCountK,
+        const MLAS_BACKEND_KERNEL_SELECTOR_CONFIG* BackendKernelSelectorConfig
+    );
+
+    Q4BitGemmPackedBColumnStrideBytes_Fn* Q4BitGemmPackedBColumnStrideBytes = nullptr;
 
     /** Gets size of packed quantized B data containing 8-bit integers. See MlasQNBitGemmPackQuantBDataSize(). */
     typedef size_t(Q8BitGemmPackQuantBDataSize_Fn)(
@@ -289,6 +366,23 @@ struct MLAS_QNBIT_GEMM_DISPATCH {
     );
 
     SQ4BitGemmM1Kernel_CompFp32_Fn* SQ4BitGemmM1Kernel_CompFp32 = nullptr;
+
+    /** M=1 GEMV for SQNBIT_CompInt8 (QuantA is Q8 workspace, symmetric / no ZP). */
+    typedef void(SQ4BitGemmM1Kernel_CompInt8_Fn)(
+        size_t BlkLen,
+        const std::byte* QuantA,
+        const std::byte* QuantBData,
+        const float* QuantBScale,
+        const std::byte* QuantBZeroPoint,
+        float* C,
+        size_t CountN,
+        size_t CountK,
+        size_t BlockCountK,
+        size_t ldc,
+        const float* Bias
+    );
+
+    SQ4BitGemmM1Kernel_CompInt8_Fn* SQ4BitGemmM1Kernel_CompInt8 = nullptr;
 
     /**
      * @brief Dequantize B into the format expected by the Sgemm kernel.
@@ -668,6 +762,16 @@ struct MLAS_QNBIT_GEMM_DISPATCH {
     );
 
     QuantizeARow_CompInt8_Fn* QuantizeARow_CompInt8 = nullptr;
+
+    /** Block-quantize one A row from fp16 activations (CompInt8 symmetric path). */
+    typedef void(QuantizeARow_CompInt8_FromFp16_Fn)(
+        size_t BlkLen,
+        const MLAS_FP16* A,
+        size_t CountK,
+        std::byte* QuantA
+    );
+
+    QuantizeARow_CompInt8_FromFp16_Fn* QuantizeARow_CompInt8_FromFp16 = nullptr;
 
     typedef void(QuantizeARowComputeBlkSum_CompInt8_Fn)(
         size_t BlkLen,

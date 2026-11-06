@@ -313,6 +313,12 @@ Return Value:
     this->RopeDispatch = &MlasRopeDispatchRvv;
     this->LayerNormF32Kernel = &MlasLayerNormKernelRvv;
 
+#if defined(MLAS_USE_IME)
+    // SpacemiT smt.vmadot. The kernel selects the tile from VLEN:
+    // X100 (VLEN 256) uses the 4x8 int8 tile, A100 (VLEN 1024) the HP tile.
+    this->QNBitGemmDispatch = &GetMlasQNBitGemmDispatchIme();
+#endif
+
 #if defined(MLAS_USE_RVV_ZVFH)
     if (MLAS_CPUIDINFO::GetCPUIDInfo().HasFp16VectorAcceleration()) {
         this->CastF16ToF32Kernel = &MlasCastF16ToF32KernelRvv;

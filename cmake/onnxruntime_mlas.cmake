@@ -1020,6 +1020,25 @@ endif()
               PROPERTIES COMPILE_FLAGS "-march=rv64gcv -mabi=lp64d")
             list(APPEND mlas_private_compile_definitions MLAS_USE_RVV=1)
 
+            # SpaceMiT X60 IME (smt.vmadot). Probe the assembler.
+            set(OLD_CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+            set(CMAKE_REQUIRED_FLAGS "${OLD_CMAKE_REQUIRED_FLAGS} -march=rv64gcv -mabi=lp64d")
+            check_cxx_source_compiles("
+              int main() { __asm__(\".option arch, +xsmtvdot\"); __asm__(\"smt.vmadot v16, v8, v9\"); return 0; }"
+              HAS_RISCV64_IME
+            )
+            set(CMAKE_REQUIRED_FLAGS "${OLD_CMAKE_REQUIRED_FLAGS}")
+            unset(OLD_CMAKE_REQUIRED_FLAGS)
+            if(HAS_RISCV64_IME)
+              list(APPEND mlas_platform_srcs
+                ${MLAS_SRC_DIR}/riscv64/sqnbitgemm_kernel_ime.cpp)
+              set_source_files_properties(
+                ${MLAS_SRC_DIR}/riscv64/sqnbitgemm_kernel_ime.cpp
+                PROPERTIES COMPILE_FLAGS "-march=rv64gcv -mabi=lp64d")
+              list(APPEND mlas_private_compile_definitions MLAS_USE_IME=1)
+            endif()
+
+
             if(onnxruntime_USE_RVV_ZVFH)
               list(APPEND mlas_platform_srcs
                 ${MLAS_SRC_DIR}/riscv64/halfgemm_kernel_rvv.cpp

@@ -35,6 +35,10 @@ Abstract:
 
 #include "mlasi.h"
 
+#if defined(__riscv_vector)
+#include <riscv_vector.h>
+#endif
+
 //
 // Decode (sequence_length == 1) GEMV helpers.
 //
@@ -58,6 +62,32 @@ MlasGQADecodeQK(
     float* scores
 )
 {
+#if defined(__riscv_vector)
+    // Eight running lanes, added in the same order as the scalar tree below.
+    // Unit-stride vle32. A wide load plus vslidedown rebuilt the same sum but
+    // the slides dominated the decode attention.
+    constexpr std::ptrdiff_t kLanes = 8;
+    const size_t lanes = static_cast<size_t>(kLanes);
+    for (std::ptrdiff_t t = 0; t < n_kv; ++t) {
+        const float* krow = k_cache + t * head_size;
+        vfloat32m1_t vacc = __riscv_vfmv_v_f_f32m1(0.0f, lanes);
+        std::ptrdiff_t h = 0;
+        for (; h + kLanes <= head_size; h += kLanes) {
+            const vfloat32m1_t qv = __riscv_vle32_v_f32m1(q + h, lanes);
+            const vfloat32m1_t kv = __riscv_vle32_v_f32m1(krow + h, lanes);
+            const vfloat32m1_t prod = __riscv_vfmul_vv_f32m1(qv, kv, lanes);
+            vacc = __riscv_vfadd_vv_f32m1(vacc, prod, lanes);
+        }
+        float acc[kLanes];
+        __riscv_vse32_v_f32m1(acc, vacc, lanes);
+        float sum = ((acc[0] + acc[1]) + (acc[2] + acc[3])) +
+                    ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+        for (; h < head_size; ++h) {
+            sum += q[h] * krow[h];
+        }
+        scores[t] = sum * scale;
+    }
+#else
     constexpr std::ptrdiff_t kLanes = 8;
     for (std::ptrdiff_t t = 0; t < n_kv; ++t) {
         const float* krow = k_cache + t * head_size;
@@ -75,6 +105,7 @@ MlasGQADecodeQK(
         }
         scores[t] = sum * scale;
     }
+#endif
 }
 
 // S*V GEMV (accumulate): out[h] = sum_t probs[t] * V[t*H + h]  for h in [0, head_size).
@@ -88,6 +119,22 @@ MlasGQADecodeSV(
     float* out
 )
 {
+#if defined(__riscv_vector)
+    // vfmul then vfadd matches the scalar `+= p * v` (two roundings), one lane
+    // per output element, tokens in order.
+    std::ptrdiff_t h = 0;
+    while (h < head_size) {
+        const size_t vl = __riscv_vsetvl_e32m8(static_cast<size_t>(head_size - h));
+        vfloat32m8_t acc = __riscv_vfmv_v_f_f32m8(0.0f, vl);
+        for (std::ptrdiff_t t = 0; t < n_kv; ++t) {
+            const vfloat32m8_t row = __riscv_vle32_v_f32m8(v_cache + t * head_size + h, vl);
+            const vfloat32m8_t scaled = __riscv_vfmul_vf_f32m8(row, probs[t], vl);
+            acc = __riscv_vfadd_vv_f32m8(acc, scaled, vl);
+        }
+        __riscv_vse32_v_f32m8(out + h, acc, vl);
+        h += static_cast<std::ptrdiff_t>(vl);
+    }
+#else
     for (std::ptrdiff_t h = 0; h < head_size; ++h) {
         out[h] = 0.0f;
     }
@@ -98,6 +145,7 @@ MlasGQADecodeSV(
             out[h] += p * vrow[h];
         }
     }
+#endif
 }
 
 void

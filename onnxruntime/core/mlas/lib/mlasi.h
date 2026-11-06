@@ -1434,6 +1434,9 @@ GetMlasQNBitGemmDispatchNeon(
     bool InitializeWithI8MMSupport
 );
 
+const MLAS_QNBIT_GEMM_DISPATCH&
+GetMlasQNBitGemmDispatchIme();
+
 extern const MLAS_QNBIT_GEMM_DISPATCH MlasSQNBitGemmDispatchAvx2;
 
 extern const MLAS_QNBIT_GEMM_DISPATCH MlasSQNBitGemmDispatchAvx2vnni;
